@@ -1,0 +1,77 @@
+[package]
+name = "sentinel-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Pingora core
+pingora = { workspace = true }
+pingora-core = { workspace = true }
+pingora-http = { workspace = true }
+pingora-proxy = { workspace = true }
+pingora-load-balancing = { workspace = true }
+pingora-timeout = { workspace = true }
+
+# Local crates
+sentinel-config = { path = "../config" }
+sentinel-common = { path = "../common" }
+sentinel-agent-protocol = { path = "../agent-protocol" }
+
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Logging and tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# HTTP
+http = { workspace = true }
+bytes = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+regex = "1.10"
+urlencoding = "2.1"
+once_cell = "1.20"
+
+# System
+nix = { version = "0.29", features = ["signal"] }
+libc = "0.2"
+signal-hook = "0.3"
+
+# File watching for hot reload
+notify = "6.1"
+
+# Networking
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+insta = { workspace = true }
+tempfile = "3.12"
+reqwest = { version = "0.12", features = ["rustls-tls"] }

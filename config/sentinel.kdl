@@ -1,0 +1,442 @@
+// Sentinel Configuration - Phase 1
+// KDL Format: https://kdl.dev
+
+// Server-wide configuration
+server {
+    worker-threads 0  // 0 = number of CPU cores
+    max-connections 10000
+    graceful-shutdown-timeout-secs 30
+    daemon false
+    pid-file "/var/run/sentinel.pid"
+}
+
+// Listener configurations
+listeners {
+    listener "http" {
+        address "0.0.0.0:8080"
+        protocol "http"
+        request-timeout-secs 60
+        keepalive-timeout-secs 75
+        max-concurrent-streams 100
+        default-route "fallback"
+    }
+
+    listener "https" {
+        address "0.0.0.0:8443"
+        protocol "https"
+        request-timeout-secs 60
+        keepalive-timeout-secs 75
+
+        tls {
+            cert-file "/etc/sentinel/certs/server.crt"
+            key-file "/etc/sentinel/certs/server.key"
+            min-version "TLS1.2"
+            ocsp-stapling true
+            session-resumption true
+            cipher-suites {
+                - "TLS_AES_128_GCM_SHA256"
+                - "TLS_AES_256_GCM_SHA384"
+                - "TLS_CHACHA20_POLY1305_SHA256"
+            }
+        }
+    }
+}
+
+// Route configurations
+routes {
+    // API routes with high priority
+    route "api-v1" {
+        priority "high"
+
+        matches {
+            path-prefix "/api/v1/"
+            host "api.example.com"
+            method "GET" "POST" "PUT" "DELETE"
+        }
+
+        upstream "api-backend"
+
+        policies {
+            timeout-secs 30
+            max-body-size "10MB"
+            failure-mode "closed"  // Fail-closed for security
+
+            request-headers {
+                set {
+                    "X-API-Version" "v1"
+                }
+                remove "Cookie"
+            }
+
+            rate-limit {
+                requests-per-second 100
+                burst 200
+                key "client_ip"
+            }
+        }
+
+        agents ["auth-agent" "rate-limit-agent"]
+        waf-enabled true
+
+        circuit-breaker {
+            failure-threshold 5
+            success-threshold 2
+            timeout-seconds 30
+            half-open-max-requests 3
+        }
+
+        retry-policy {
+            max-attempts 3
+            timeout-ms 5000
+            backoff-base-ms 100
+            backoff-max-ms 2000
+            retryable-status-codes [502 503 504]
+        }
+    }
+
+    // Static content routes
+    route "static" {
+        priority "normal"
+
+        matches {
+            path-prefix "/static/"
+            path-prefix "/assets/"
+        }
+
+        upstream "cdn-backend"
+
+        policies {
+            timeout-secs 10
+            failure-mode "open"  // Fail-open for static content
+
+            response-headers {
+                set {
+                    "Cache-Control" "public, max-age=86400"
+                }
+            }
+        }
+    }
+
+    // Health check endpoint (no upstream)
+    route "health" {
+        priority "high"
+
+        matches {
+            path "/health"
+            path "/ready"
+        }
+
+        upstream "health-backend"
+
+        policies {
+            timeout-secs 1
+            failure-mode "open"
+        }
+    }
+
+    // WebSocket route
+    route "websocket" {
+        priority "normal"
+
+        matches {
+            path-prefix "/ws/"
+            header "Upgrade" "websocket"
+        }
+
+        upstream "websocket-backend"
+
+        policies {
+            timeout-secs 3600  // 1 hour for WebSocket
+            buffer-requests false
+            buffer-responses false
+        }
+    }
+
+    // Fallback route (catches all)
+    route "fallback" {
+        priority "low"
+
+        matches {
+            path-prefix "/"
+        }
+
+        upstream "default-backend"
+
+        policies {
+            timeout-secs 30
+            failure-mode "closed"
+        }
+    }
+}
+
+// Upstream pool configurations
+upstreams {
+    upstream "api-backend" {
+        targets {
+            target {
+                address "10.1.1.10:8080"
+                weight 1
+                metadata {
+                    "zone" "us-east-1a"
+                    "version" "v2.1.0"
+                }
+            }
+            target {
+                address "10.1.1.11:8080"
+                weight 1
+                metadata {
+                    "zone" "us-east-1b"
+                    "version" "v2.1.0"
+                }
+            }
+        }
+
+        load-balancing "least_connections"
+
+        health-check {
+            type "http" {
+                path "/health"
+                expected-status 200
+                host "api.internal"
+            }
+            interval-secs 10
+            timeout-secs 5
+            healthy-threshold 2
+            unhealthy-threshold 3
+        }
+
+        connection-pool {
+            max-connections 100
+            max-idle 20
+            idle-timeout-secs 60
+            max-lifetime-secs 300
+        }
+
+        timeouts {
+            connect-secs 10
+            request-secs 30
+            read-secs 30
+            write-secs 30
+        }
+    }
+
+    upstream "cdn-backend" {
+        targets {
+            target {
+                address "cdn.example.com:443"
+                weight 1
+            }
+        }
+
+        load-balancing "round_robin"
+
+        health-check {
+            type "tcp"
+            interval-secs 30
+            timeout-secs 5
+            healthy-threshold 1
+            unhealthy-threshold 2
+        }
+
+        tls {
+            sni "cdn.example.com"
+            insecure-skip-verify false
+        }
+    }
+
+    upstream "websocket-backend" {
+        targets {
+            target {
+                address "10.1.2.10:8080"
+                weight 1
+            }
+            target {
+                address "10.1.2.11:8080"
+                weight 1
+            }
+        }
+
+        load-balancing "ip_hash"  // Sticky sessions for WebSocket
+
+        health-check {
+            type "tcp"
+            interval-secs 10
+            timeout-secs 5
+            healthy-threshold 2
+            unhealthy-threshold 3
+        }
+    }
+
+    upstream "default-backend" {
+        targets {
+            target {
+                address "127.0.0.1:8081"
+                weight 1
+            }
+        }
+
+        load-balancing "round_robin"
+    }
+
+    upstream "health-backend" {
+        targets {
+            target {
+                address "127.0.0.1:9999"  // Local health endpoint
+                weight 1
+            }
+        }
+
+        load-balancing "round_robin"
+    }
+}
+
+// Agent configurations (Phase 2)
+agents {
+    agent "auth-agent" {
+        type "auth"
+        transport "unix_socket" {
+            path "/var/run/sentinel/auth.sock"
+        }
+        events ["request_headers"]
+        timeout-ms 100
+        failure-mode "closed"  // Fail-closed for auth
+
+        circuit-breaker {
+            failure-threshold 3
+            success-threshold 2
+            timeout-seconds 10
+            half-open-max-requests 1
+        }
+    }
+
+    agent "rate-limit-agent" {
+        type "rate_limit"
+        transport "unix_socket" {
+            path "/var/run/sentinel/ratelimit.sock"
+        }
+        events ["request_headers"]
+        timeout-ms 50
+        failure-mode "open"  // Fail-open for rate limiting
+    }
+
+    agent "waf-agent" {
+        type "waf"
+        transport "unix_socket" {
+            path "/var/run/sentinel/waf.sock"
+        }
+        events ["request_headers" "request_body"]
+        timeout-ms 200
+        failure-mode "closed"
+        max-request-body-bytes 1048576  // 1MB
+    }
+}
+
+// WAF configuration (Phase 3)
+waf {
+    engine "modsecurity"
+
+    ruleset {
+        crs-version "3.3.4"
+        paranoia-level 1
+        anomaly-threshold 5
+        custom-rules-dir "/etc/sentinel/waf/rules"
+
+        exclusions {
+            exclusion {
+                rule-ids ["920350" "920420"]
+                scope "global"
+            }
+            exclusion {
+                rule-ids ["941100"]
+                scope "path" "/api/v1/upload"
+            }
+        }
+    }
+
+    mode "prevention"  // "detection" or "prevention"
+    audit-log true
+
+    body-inspection {
+        inspect-request-body true
+        inspect-response-body false
+        max-inspection-bytes 1048576  // 1MB
+        content-types [
+            "application/x-www-form-urlencoded"
+            "multipart/form-data"
+            "application/json"
+            "application/xml"
+            "text/xml"
+        ]
+        decompress true
+        max-decompression-ratio 100.0
+    }
+}
+
+// Resource limits
+limits {
+    // Header limits
+    max-header-size-bytes 8192
+    max-header-count 100
+    max-header-name-bytes 256
+    max-header-value-bytes 4096
+
+    // Body limits
+    max-body-size-bytes 10485760  // 10MB
+    max-body-buffer-bytes 1048576  // 1MB
+    max-body-inspection-bytes 1048576  // 1MB
+
+    // Decompression limits
+    max-decompression-ratio 100.0
+    max-decompressed-size-bytes 104857600  // 100MB
+
+    // Connection limits
+    max-connections-per-client 100
+    max-connections-per-route 1000
+    max-total-connections 10000
+    max-idle-connections-per-upstream 100
+
+    // Request limits
+    max-in-flight-requests 10000
+    max-in-flight-requests-per-worker 1000
+    max-queued-requests 1000
+
+    // Agent limits
+    max-agent-queue-depth 100
+    max-agent-body-bytes 1048576  // 1MB
+    max-agent-response-bytes 10240  // 10KB
+
+    // Rate limits
+    max-requests-per-second-global 50000
+    max-requests-per-second-per-client 100
+}
+
+// Observability configuration
+observability {
+    metrics {
+        enabled true
+        address "0.0.0.0:9090"
+        path "/metrics"
+        high-cardinality false
+    }
+
+    logging {
+        level "info"  // "trace", "debug", "info", "warn", "error"
+        format "json"  // "json" or "pretty"
+        timestamps true
+
+        access-log {
+            enabled true
+            file "/var/log/sentinel/access.log"
+            format "combined"
+            buffer-size 8192
+        }
+    }
+
+    tracing {
+        backend "otlp" {
+            endpoint "http://localhost:4317"
+        }
+        sampling-rate 0.01  // 1% sampling
+        service-name "sentinel"
+    }
+}

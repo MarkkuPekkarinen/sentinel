@@ -1,0 +1,52 @@
+[package]
+name = "sentinel-denylist-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sentinel Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raskell-io/sentinel"
+
+[[bin]]
+name = "denylist-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Local dependencies
+sentinel-agent-protocol = { path = "../../crates/agent-protocol" }
+sentinel-common = { path = "../../crates/common" }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Pattern matching
+regex = "1.10"
+ipnet = "2.9"
+cidr = "0.2"
+
+# File watching for hot reload
+notify = "6.1"
+
+# Utilities
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+parking_lot = "0.12"
+
+# Command line
+clap = { version = "4.5", features = ["derive", "env"] }
+
+[dev-dependencies]
+tempfile = "3.12"
