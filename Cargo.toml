@@ -1,0 +1,103 @@
+[workspace]
+members = [
+    "crates/proxy",
+    "crates/agent-protocol",
+    "crates/config",
+    "crates/common",
+    "agents/echo",
+    "agents/denylist",
+    "agents/ratelimit",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Sentinel Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raskell-io/sentinel"
+rust-version = "1.92"
+
+[workspace.dependencies]
+# Core dependencies
+pingora = { version = "0.6", features = ["proxy", "lb"] }
+pingora-core = "0.6"
+pingora-http = "0.6"
+pingora-proxy = "0.6"
+pingora-load-balancing = "0.6"
+pingora-timeout = "0.6"
+
+# Async runtime
+tokio = { version = "1.48", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+kdl = "6.0"
+miette = { version = "7.4", features = ["fancy"] }
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+prometheus = "0.14"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# IPC and protocol
+prost = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
+bytes = "1.9"
+
+# Configuration and validation
+config = "0.14"
+validator = { version = "0.18", features = ["derive"] }
+
+# Testing
+proptest = "1.6"
+criterion = "0.6"
+insta = "1.41"
+
+# Security
+rustls = "0.23"
+rustls-pemfile = "2.2"
+
+# HTTP
+http = "1.2"
+hyper = "1.5"
+tower = "0.5"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.1"
+parking_lot = "0.12"
+arc-swap = "1.7"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+debug = false
+panic = "abort"
+
+[profile.release-with-debug]
+inherits = "release"
+strip = false
+debug = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 2
+debug = true
+
+[profile.bench]
+opt-level = 3
+debug = false

@@ -1,0 +1,97 @@
+[Unit]
+Description=Sentinel Security-First Reverse Proxy
+Documentation=https://github.com/raskell-io/sentinel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sentinel-proxy
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=10
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# User and permissions
+User=sentinel
+Group=sentinel
+UMask=0077
+
+# Environment
+Environment="RUST_LOG=info"
+Environment="SENTINEL_CONFIG=/etc/sentinel/config.kdl"
+EnvironmentFile=-/etc/sentinel/env
+
+# Working directory
+WorkingDirectory=/var/lib/sentinel
+RuntimeDirectory=sentinel
+RuntimeDirectoryMode=0755
+StateDirectory=sentinel
+StateDirectoryMode=0700
+LogsDirectory=sentinel
+LogsDirectoryMode=0755
+ConfigurationDirectory=sentinel
+ConfigurationDirectoryMode=0755
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+
+# Resource limits
+LimitNOFILE=65535
+LimitNPROC=4096
+LimitCORE=0
+TasksMax=4096
+CPUWeight=100
+MemoryMax=2G
+MemoryHigh=1500M
+
+# IO limits (optional, adjust as needed)
+# IOWeight=100
+# IOReadBandwidthMax=/dev/sda 100M
+# IOWriteBandwidthMax=/dev/sda 50M
+
+# Network
+# Uncomment to bind to specific capabilities
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel
+
+# Process management
+# Set OOM score to avoid being killed
+OOMScoreAdjust=-500
+
+# Watchdog (optional, requires implementation in proxy)
+# WatchdogSec=10s
+
+[Install]
+WantedBy=multi-user.target
+Alias=sentinel-proxy.service

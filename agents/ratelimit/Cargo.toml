@@ -1,0 +1,61 @@
+[package]
+name = "sentinel-ratelimit-agent"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sentinel Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/raskell-io/sentinel"
+
+[[bin]]
+name = "ratelimit-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Local dependencies
+sentinel-agent-protocol = { path = "../../crates/agent-protocol" }
+sentinel-common = { path = "../../crates/common" }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Rate limiting
+governor = "0.6"
+nonzero_ext = "0.3"
+
+# Data structures
+dashmap = "6.1"
+parking_lot = "0.12"
+arc-swap = "1.7"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Metrics
+prometheus = "0.13"
+
+# Network
+ipnet = "2.9"
+
+# Command line
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Configuration
+config = "0.14"
+
+[dev-dependencies]
+tempfile = "3.12"
+criterion = "0.5"

@@ -1,0 +1,388 @@
+# Sentinel - mise configuration
+# Production-grade reverse proxy built on Pingora
+
+[env]
+RUST_BACKTRACE = "1"
+CARGO_TERM_COLOR = "always"
+RUST_LOG = "info"
+SENTINEL_CONFIG = "config/sentinel.kdl"
+SENTINEL_WORKERS = "0"
+
+[tools]
+rust = "1.92.0"
+# These cargo tools are not recognized by mise yet, commenting out to avoid warnings
+# cargo-audit = "latest"
+# cargo-tarpaulin = "latest"
+# cargo-watch = "latest"
+# cargo-machete = "latest"
+# cargo-flamegraph = "latest"
+
+# Build tasks
+[tasks.build]
+description = "Build debug binary"
+run = "cargo build --workspace"
+
+[tasks.release]
+description = "Build optimized release binary"
+run = """
+cargo build --release --workspace
+strip target/release/sentinel-proxy 2>/dev/null || true
+strip target/release/echo-agent 2>/dev/null || true
+strip target/release/ratelimit-agent 2>/dev/null || true
+echo "Release build complete"
+"""
+
+[tasks.install]
+description = "Build and install release binaries"
+depends = ["release"]
+run = """
+sudo cp target/release/sentinel-proxy /usr/local/bin/
+sudo cp target/release/echo-agent /usr/local/bin/ 2>/dev/null || true
+sudo cp target/release/ratelimit-agent /usr/local/bin/ 2>/dev/null || true
+echo "Installation complete"
+"""
+
+# Test tasks
+[tasks.test]
+description = "Run all tests"
+run = "cargo test --workspace --all-features -- --nocapture"
+
+[tasks.test-unit]
+description = "Run unit tests only"
+run = "cargo test --workspace --lib"
+
+[tasks.test-integration]
+description = "Run integration tests"
+run = """
+cargo test --workspace --test '*'
+./tests/test_agents.sh
+"""
+
+[tasks.test-coverage]
+description = "Generate test coverage report"
+run = """
+cargo tarpaulin --workspace --all-features --out html --output-dir target/coverage
+echo "Coverage report generated: target/coverage/tarpaulin-report.html"
+"""
+
+[tasks.bench]
+description = "Run benchmarks"
+run = "cargo bench --workspace --no-fail-fast"
+
+# Code quality tasks
+[tasks.fmt]
+description = "Format code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check code formatting"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Run clippy linter"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.audit]
+description = "Run security audit"
+run = "cargo audit"
+
+[tasks.check]
+description = "Run fmt, lint, and test"
+depends = ["fmt", "lint", "test"]
+
+[tasks.unused-deps]
+description = "Check for unused dependencies"
+run = "cargo machete"
+
+# Development tasks
+[tasks.run]
+description = "Run proxy with debug build"
+depends = ["build"]
+run = "RUST_LOG=${RUST_LOG:-debug} ./target/debug/sentinel-proxy"
+
+[tasks.run-release]
+description = "Run proxy with release build"
+depends = ["release"]
+run = "./target/release/sentinel-proxy"
+
+[tasks.watch]
+description = "Watch for changes and rebuild"
+run = "cargo watch -x build -x test"
+
+[tasks.dev]
+description = "Run development environment with all agents"
+run = """
+#!/bin/bash
+set -e
+
+# Build everything first
+mise run build
+
+# Start agents in background
+echo "Starting echo agent..."
+./target/debug/echo-agent --socket /tmp/sentinel-echo.sock &
+ECHO_PID=$!
+
+echo "Starting rate limit agent..."
+./target/debug/ratelimit-agent --socket /tmp/sentinel-ratelimit.sock &
+RATELIMIT_PID=$!
+
+# Trap to cleanup on exit
+trap "kill $ECHO_PID $RATELIMIT_PID 2>/dev/null || true" EXIT INT TERM
+
+# Start proxy in foreground
+echo "Starting proxy..."
+RUST_LOG=debug ./target/debug/sentinel-proxy
+"""
+
+# Agent tasks
+[tasks.agent-echo]
+description = "Run echo agent"
+depends = ["build"]
+run = "./target/debug/echo-agent --socket /tmp/echo.sock --verbose"
+
+[tasks.agent-ratelimit]
+description = "Run rate limit agent"
+depends = ["build"]
+run = "./target/debug/ratelimit-agent --socket /tmp/ratelimit.sock --default-rps 100"
+
+[tasks.agent-test]
+description = "Test agent communication"
+depends = ["build"]
+run = "./tests/test_agents.sh"
+
+# Documentation tasks
+[tasks.docs]
+description = "Generate and open documentation"
+run = "cargo doc --workspace --all-features --no-deps --open"
+
+[tasks.docs-serve]
+description = "Serve documentation locally"
+run = """
+cargo doc --workspace --all-features --no-deps
+cd target/doc && python3 -m http.server 8000
+"""
+
+# Clean tasks
+[tasks.clean]
+description = "Clean build artifacts"
+run = """
+cargo clean
+rm -rf target/coverage
+rm -f /tmp/sentinel*.sock
+echo "Clean complete"
+"""
+
+[tasks.clean-all]
+description = "Deep clean including installed binaries"
+depends = ["clean"]
+run = """
+sudo rm -f /usr/local/bin/sentinel-proxy
+sudo rm -f /usr/local/bin/echo-agent
+sudo rm -f /usr/local/bin/ratelimit-agent
+echo "Deep clean complete"
+"""
+
+# Deployment tasks
+[tasks.deploy]
+description = "Deploy to production"
+depends = ["release", "test"]
+run = "./deploy/deploy.sh install"
+
+[tasks.upgrade]
+description = "Upgrade existing installation"
+depends = ["release", "test"]
+run = "./deploy/deploy.sh upgrade"
+
+[tasks.rollback]
+description = "Rollback to previous version"
+run = "./deploy/deploy.sh rollback"
+
+[tasks.systemd-install]
+description = "Install systemd services"
+run = """
+sudo cp deploy/*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable sentinel.service
+echo "Systemd services installed"
+"""
+
+[tasks.systemd-start]
+description = "Start all services"
+run = """
+sudo systemctl start sentinel.service
+sudo systemctl start sentinel-echo-agent.service || true
+sudo systemctl start sentinel-ratelimit-agent.service || true
+"""
+
+[tasks.systemd-stop]
+description = "Stop all services"
+run = """
+sudo systemctl stop sentinel-echo-agent.service || true
+sudo systemctl stop sentinel-ratelimit-agent.service || true
+sudo systemctl stop sentinel.service
+"""
+
+[tasks.systemd-status]
+description = "Show service status"
+run = """
+systemctl status sentinel.service --no-pager || true
+echo ""
+systemctl status sentinel-echo-agent.service --no-pager || true
+echo ""
+systemctl status sentinel-ratelimit-agent.service --no-pager || true
+"""
+
+# Configuration tasks
+[tasks.config-validate]
+description = "Validate configuration"
+run = "./target/release/sentinel-proxy --validate --config ${SENTINEL_CONFIG}"
+
+[tasks.config-reload]
+description = "Reload configuration (hot reload)"
+run = "sudo kill -HUP $(cat /var/run/sentinel.pid)"
+
+[tasks.config-example]
+description = "Generate example configuration"
+run = """
+cat > config/example.kdl << 'EOF'
+// Example Sentinel Configuration
+server {
+    worker-threads 4
+    max-connections 10000
+}
+
+listeners {
+    listener "http" {
+        address "0.0.0.0:8080"
+        protocol "http"
+    }
+}
+
+routes {
+    route "default" {
+        matches { path-prefix "/" }
+        upstream "backend"
+        agents ["echo-agent"]
+    }
+}
+
+upstreams {
+    upstream "backend" {
+        targets {
+            target { address "127.0.0.1:8081" weight 1 }
+        }
+        load-balancing "round_robin"
+    }
+}
+
+agents {
+    agent "echo-agent" {
+        type "custom"
+        transport "unix_socket" { path "/tmp/echo.sock" }
+        events ["request_headers"]
+        timeout-ms 100
+        failure-mode "open"
+    }
+}
+EOF
+echo "Example configuration created: config/example.kdl"
+"""
+
+# Performance tasks
+[tasks.profile]
+description = "Run with profiling"
+depends = ["release"]
+run = """
+RUST_LOG=debug perf record -g ./target/release/sentinel-proxy
+perf report
+"""
+
+[tasks.flamegraph]
+description = "Generate flamegraph"
+run = """
+cargo flamegraph --bin sentinel-proxy -- --help
+echo "Flamegraph saved to flamegraph.svg"
+"""
+
+[tasks.load-test]
+description = "Run load test"
+run = """
+echo "Ensure proxy is running first!"
+echo "Using k6 for load testing..."
+k6 run tests/load/basic.js || echo "Install k6 from https://k6.io"
+"""
+
+# Utility tasks
+[tasks.version]
+description = "Show version information"
+run = """
+echo "Sentinel Version Information:"
+echo "=============================="
+./target/release/sentinel-proxy --version 2>/dev/null || echo "Not built yet"
+echo ""
+echo "Git commit: $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
+echo "Build time: $(date)"
+"""
+
+[tasks.stats]
+description = "Show project statistics"
+run = """
+echo "Project Statistics:"
+echo "=================="
+echo "Lines of Rust code:"
+find crates agents -name "*.rs" | xargs wc -l | tail -1
+echo ""
+echo "Dependencies:"
+cargo tree | head -20
+echo ""
+echo "Binary sizes (if built):"
+ls -lh target/release/sentinel-proxy 2>/dev/null || echo "Not built yet"
+ls -lh target/release/echo-agent 2>/dev/null || echo "Not built yet"
+ls -lh target/release/ratelimit-agent 2>/dev/null || echo "Not built yet"
+"""
+
+[tasks.ci]
+description = "Run CI checks locally"
+depends = ["fmt-check", "lint", "test", "audit"]
+run = "echo 'All CI checks passed!'"
+
+[tasks.setup]
+description = "Set up development environment"
+run = """
+echo "Setting up Sentinel development environment..."
+rustup component add rustfmt clippy
+cargo install cargo-audit cargo-tarpaulin cargo-watch cargo-machete cargo-flamegraph
+echo "Creating directories..."
+mkdir -p config logs tests/load
+echo "Development environment ready!"
+echo ""
+echo "Quick start:"
+echo "  mise run build      # Build the project"
+echo "  mise run dev        # Run development environment"
+echo "  mise run test       # Run tests"
+echo "  mise run check      # Run all checks"
+"""
+
+[tasks.all]
+description = "Build everything and run all tests"
+depends = ["fmt", "lint", "build", "test", "audit"]
+run = "echo 'Full build and test completed successfully!'"
+
+# Quick aliases
+[tasks.b]
+alias = "build"
+
+[tasks.r]
+alias = "run"
+
+[tasks.t]
+alias = "test"
+
+[tasks.c]
+alias = "check"
+
+# Default task
+[tasks.default]
+description = "Show available tasks"
+run = "mise tasks"
