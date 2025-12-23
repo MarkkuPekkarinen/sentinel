@@ -1,0 +1,115 @@
+[Unit]
+Description=Sentinel WAF Agent - ModSecurity-based Web Application Firewall
+Documentation=https://github.com/raskell-io/sentinel
+After=network.target sentinel-proxy.service
+Requires=sentinel-proxy.service
+PartOf=sentinel-proxy.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/local/bin/sentinel-waf-agent
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillMode=mixed
+KillSignal=SIGTERM
+
+# User and group
+User=sentinel
+Group=sentinel
+
+# Environment
+Environment="RUST_LOG=info,sentinel_waf_agent=debug"
+Environment="WAF_CONFIG=/etc/sentinel/waf.yaml"
+EnvironmentFile=-/etc/sentinel/waf.env
+
+# Working directory
+WorkingDirectory=/var/lib/sentinel/waf
+
+# Runtime directory and mode
+RuntimeDirectory=sentinel
+RuntimeDirectoryMode=0755
+
+# State directory
+StateDirectory=sentinel/waf
+StateDirectoryMode=0700
+
+# Logs directory
+LogsDirectory=sentinel-waf
+LogsDirectoryMode=0750
+
+# Configuration directory
+ConfigurationDirectory=sentinel
+ConfigurationDirectoryMode=0755
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Allow network access for metrics endpoint
+PrivateNetwork=false
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# Resource limits
+MemoryMax=2G
+MemoryHigh=1G
+CPUQuota=200%
+TasksMax=4096
+LimitNOFILE=65535
+LimitNPROC=512
+
+# Capabilities (none needed)
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Read-write paths for WAF
+ReadWritePaths=/var/log/sentinel-waf
+ReadWritePaths=/var/run/sentinel
+ReadWritePaths=/var/lib/sentinel/waf
+
+# Read-only paths for rules and libraries
+ReadOnlyPaths=/usr/share/modsecurity-crs
+ReadOnlyPaths=/usr/local/share/modsecurity-crs
+ReadOnlyPaths=/opt/modsecurity-crs
+ReadOnlyPaths=/etc/sentinel
+ReadOnlyPaths=/usr/lib
+ReadOnlyPaths=/usr/local/lib
+
+# Process options
+Nice=0
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
+CPUSchedulingPolicy=other
+CPUSchedulingPriority=0
+
+# Watchdog
+WatchdogSec=30s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sentinel-waf
+
+[Install]
+WantedBy=multi-user.target

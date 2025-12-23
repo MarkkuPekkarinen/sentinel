@@ -1,0 +1,100 @@
+[package]
+name = "sentinel-waf-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sentinel-waf-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Internal dependencies
+agent-protocol = { path = "../../crates/agent-protocol" }
+sentinel-common = { path = "../../crates/common" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "fs"] }
+async-trait = { workspace = true }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# Logging and tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+tracing-futures = "0.2"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# HTTP
+http = { workspace = true }
+bytes = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+
+# Configuration
+config = { workspace = true }
+validator = { workspace = true }
+
+# Signal handling
+tokio-signal = "0.2"
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Memory management
+crossbeam-channel = "0.5"
+bounded-vec-deque = "0.1"
+
+# File watching for rule reload
+notify = "6.1"
+
+# Pattern matching
+regex = "1.10"
+glob = "0.3"
+
+# ModSecurity FFI (we'll implement bindings)
+libc = "0.2"
+once_cell = "1.19"
+
+# Audit log formatting
+serde_with = "3.9"
+
+# CPU detection
+num_cpus = "1.16"
+
+# RAII guards
+scopeguard = "1.2"
+
+[build-dependencies]
+cc = "1.0"
+pkg-config = "0.3"
+bindgen = "0.69"
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"
+insta = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[features]
+default = ["modsecurity3"]
+modsecurity3 = []
+modsecurity2 = []
+standalone = []  # Run without ModSecurity for testing
