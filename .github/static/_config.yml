@@ -1,0 +1,51 @@
+# GitHub Pages Configuration
+# This file configures GitHub Pages behavior for the Sentinel documentation
+
+# Theme configuration (not used with mdBook, but required by GitHub Pages)
+theme: null
+
+# Exclude files from processing
+exclude:
+  - README.md
+  - Makefile
+  - book.toml
+  - src/
+  - .gitignore
+  - .mise/
+  - mise.toml
+
+# Include specific files
+include:
+  - .nojekyll
+
+# Plugins (disabled for mdBook static site)
+plugins: []
+
+# Site settings
+title: Sentinel Documentation
+description: Production-grade reverse proxy built on Pingora
+url: https://raskell-io.github.io
+baseurl: /sentinel
+
+# Build settings
+markdown: kramdown
+kramdown:
+  input: GFM
+  hard_wrap: false
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    css_class: 'highlight'
+
+# Disable Jekyll processing (we use mdBook)
+disable_jekyll: true
+
+# Custom headers
+headers:
+  - path: "/*"
+    headers:
+      - name: "X-Content-Type-Options"
+        value: "nosniff"
+      - name: "X-Frame-Options"
+        value: "SAMEORIGIN"
+      - name: "Cache-Control"
+        value: "public, max-age=3600"
