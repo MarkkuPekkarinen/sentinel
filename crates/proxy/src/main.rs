@@ -20,6 +20,7 @@ mod app;
 mod config;
 mod errors;
 mod health;
+mod http3;
 mod metrics;
 mod reload;
 mod routing;
@@ -31,6 +32,7 @@ use crate::agents::{AgentCallContext, AgentDecision, AgentManager};
 use crate::app::{AppState, HealthCheck, ReadinessCheck};
 use crate::errors::ErrorHandler;
 use crate::health::{HealthChecker, PassiveHealthChecker};
+use crate::http3::{enable_http3, Http3Server};
 use crate::metrics::Metrics;
 use crate::reload::{
     ConfigManager, GracefulReloadCoordinator, ReloadEvent, ReloadTrigger, RouteValidator,
@@ -65,6 +67,12 @@ pub struct SentinelProxy {
     app_state: Arc<AppState>,
     /// Graceful reload coordinator
     reload_coordinator: Arc<GracefulReloadCoordinator>,
+    /// Error handlers per route
+    error_handlers: Arc<RwLock<HashMap<String, Arc<ErrorHandler>>>>,
+    /// API schema validators per route
+    validators: Arc<RwLock<HashMap<String, Arc<SchemaValidator>>>>,
+    /// Static file servers per route
+    static_servers: Arc<RwLock<HashMap<String, Arc<StaticFileServer>>>>,
 }
 
 impl SentinelProxy {
@@ -95,11 +103,11 @@ impl SentinelProxy {
         // Create route matcher
         let route_matcher = Arc::new(RwLock::new(RouteMatcher::new(config.routes.clone(), None)?));
 
-        // Create upstream pools
+        // Create upstream pools (skip for static routes as they don't need upstreams)
         let mut pools = HashMap::new();
-        for (name, upstream_config) in config.upstreams.clone() {
-            let pool = Arc::new(UpstreamPool::new(upstream_config).await?);
-            pools.insert(name, pool);
+        for upstream_config in &config.upstreams {
+            let pool = Arc::new(UpstreamPool::new(upstream_config.clone()).await?);
+            pools.insert(upstream_config.id.clone(), pool);
         }
         let upstream_pools = Arc::new(RwLock::new(pools));
 
@@ -147,13 +155,16 @@ impl SentinelProxy {
 
                         // Update upstream pools
                         let mut new_pools = HashMap::new();
-                        for (name, upstream_config) in new_config.upstreams.clone() {
-                            match UpstreamPool::new(upstream_config).await {
+                        for upstream_config in &new_config.upstreams {
+                            match UpstreamPool::new(upstream_config.clone()).await {
                                 Ok(pool) => {
-                                    new_pools.insert(name, Arc::new(pool));
+                                    new_pools.insert(upstream_config.id.clone(), Arc::new(pool));
                                 }
                                 Err(e) => {
-                                    error!("Failed to create upstream pool: {}", e);
+                                    error!(
+                                        "Failed to create upstream pool {}: {}",
+                                        upstream_config.id, e
+                                    );
                                 }
                             }
                         }
@@ -178,6 +189,66 @@ impl SentinelProxy {
             }
         });
 
+        // Initialize service type components
+        let mut error_handlers_map = HashMap::new();
+        let mut validators_map = HashMap::new();
+        let mut static_servers_map = HashMap::new();
+
+        for route in &config.routes {
+            info!(
+                "Initializing components for route: {} with service type: {:?}",
+                route.id, route.service_type
+            );
+
+            // Initialize error handler for each route
+            if let Some(ref error_config) = route.error_pages {
+                let handler =
+                    ErrorHandler::new(route.service_type.clone(), Some(error_config.clone()));
+                error_handlers_map.insert(route.id.clone(), Arc::new(handler));
+                debug!("Initialized error handler for route: {}", route.id);
+            } else {
+                // Use default error handler for the service type
+                let handler = ErrorHandler::new(route.service_type.clone(), None);
+                error_handlers_map.insert(route.id.clone(), Arc::new(handler));
+            }
+
+            // Initialize schema validator for API routes
+            if route.service_type == sentinel_config::ServiceType::Api {
+                if let Some(ref api_schema) = route.api_schema {
+                    match SchemaValidator::new(api_schema.clone()) {
+                        Ok(validator) => {
+                            validators_map.insert(route.id.clone(), Arc::new(validator));
+                            info!("Initialized schema validator for route: {}", route.id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to initialize schema validator for route {}: {}",
+                                route.id, e
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Initialize static file server for static routes
+            if route.service_type == sentinel_config::ServiceType::Static {
+                if let Some(ref static_config) = route.static_files {
+                    let server = StaticFileServer::new(static_config.clone());
+                    static_servers_map.insert(route.id.clone(), Arc::new(server));
+                    info!("Initialized static file server for route: {}", route.id);
+                } else {
+                    warn!(
+                        "Static route {} has no static_files configuration",
+                        route.id
+                    );
+                }
+            }
+        }
+
+        let error_handlers = Arc::new(RwLock::new(error_handlers_map));
+        let validators = Arc::new(RwLock::new(validators_map));
+        let static_servers = Arc::new(RwLock::new(static_servers_map));
+
         // Mark as ready
         app_state.set_ready(true);
 
@@ -190,6 +261,9 @@ impl SentinelProxy {
             metrics,
             app_state,
             reload_coordinator,
+            error_handlers,
+            validators,
+            static_servers,
         })
     }
 
@@ -243,6 +317,53 @@ impl ProxyHttp for SentinelProxy {
         }
     }
 
+    async fn fail_to_connect(
+        &self,
+        session: &mut Session,
+        _peer: &HttpPeer,
+        ctx: &mut Self::CTX,
+        e: Option<&Box<Error>>,
+    ) -> Result<(), Box<Error>> {
+        // Generate custom error page for connection failures
+        if let Some(ref route_id) = ctx.route_id {
+            if let Some(error_handler) = self.error_handlers.read().await.get(route_id) {
+                let error_msg = e
+                    .map(|err| err.to_string())
+                    .unwrap_or_else(|| "Connection failed".to_string());
+
+                match error_handler.generate_response(
+                    http::StatusCode::BAD_GATEWAY,
+                    Some(format!("Unable to connect to upstream: {}", error_msg)),
+                    &ctx.correlation_id,
+                    None,
+                ) {
+                    Ok(error_response) => {
+                        let mut resp_header =
+                            ResponseHeader::build(http::StatusCode::BAD_GATEWAY.as_u16(), None)?;
+                        for (key, value) in error_response.headers() {
+                            resp_header
+                                .insert_header(key.as_str(), value.to_str().unwrap_or(""))?;
+                        }
+                        let body_bytes = error_response.into_body().into();
+
+                        session.set_keepalive(None);
+                        session.write_response_header(Box::new(resp_header)).await?;
+                        session.write_response_body(Some(body_bytes)).await?;
+                        session.finish_body().await?;
+
+                        return Ok(());
+                    }
+                    Err(handler_err) => {
+                        error!("Failed to generate error response: {}", handler_err);
+                    }
+                }
+            }
+        }
+
+        // Fall back to default error
+        Err(Error::explain(ErrorType::BadGateway, "Connection failed"))
+    }
+
     async fn upstream_peer(
         &self,
         session: &mut Session,
@@ -281,23 +402,72 @@ impl ProxyHttp for SentinelProxy {
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No matching route found"))?;
 
         ctx.route_id = Some(route_match.route_id.to_string());
-        ctx.upstream = Some(route_match.config.upstream.clone());
+
+        // Check if this is a static file route
+        if route_match.config.service_type == sentinel_config::ServiceType::Static {
+            // Static routes don't need an upstream
+            if let Some(ref static_server_map) =
+                self.static_servers.read().await.get(&route_match.route_id)
+            {
+                // Mark this as a static route for later processing
+                ctx.upstream = Some(format!("_static_{}", route_match.route_id));
+                debug!(
+                    correlation_id = %ctx.correlation_id,
+                    route_id = %route_match.route_id,
+                    "Route is configured for static file serving"
+                );
+                // Return error to avoid upstream connection for static routes
+                return Err(Error::explain(
+                    ErrorType::InternalError,
+                    "Static file serving handled in request_filter",
+                ));
+            }
+        }
+
+        // Regular route with upstream
+        if let Some(ref upstream) = route_match.config.upstream {
+            ctx.upstream = Some(upstream.clone());
+        } else {
+            return Err(Error::explain(
+                ErrorType::InternalError,
+                format!(
+                    "Route '{}' has no upstream configured",
+                    route_match.route_id
+                ),
+            ));
+        }
 
         info!(
             correlation_id = %ctx.correlation_id,
             route_id = %route_match.route_id,
-            upstream = %route_match.config.upstream,
+            upstream = ?ctx.upstream,
             method = %req_header.method,
             path = %req_header.uri.path(),
             "Request matched to route"
         );
 
-        // Get upstream pool
+        // Get upstream pool (skip for static routes)
+        if ctx
+            .upstream
+            .as_ref()
+            .map_or(false, |u| u.starts_with("_static_"))
+        {
+            // Static routes are handled in request_filter, should not reach here
+            return Err(Error::explain(
+                ErrorType::InternalError,
+                "Static route should be handled in request_filter",
+            ));
+        }
+
         let pools = self.upstream_pools.read().await;
-        let pool = pools.get(&route_match.config.upstream).ok_or_else(|| {
+        let upstream_name = ctx
+            .upstream
+            .as_ref()
+            .ok_or_else(|| Error::explain(ErrorType::InternalError, "No upstream configured"))?;
+        let pool = pools.get(upstream_name).ok_or_else(|| {
             Error::explain(
                 ErrorType::InternalError,
-                format!("Upstream pool '{}' not found", route_match.config.upstream),
+                format!("Upstream pool '{}' not found", upstream_name),
             )
         })?;
 
@@ -351,6 +521,227 @@ impl ProxyHttp for SentinelProxy {
         session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<bool, Box<Error>> {
+        // Handle static file serving
+        if let Some(ref upstream) = ctx.upstream {
+            if upstream.starts_with("_static_") {
+                // Extract route ID from the static marker
+                let route_id = upstream.strip_prefix("_static_").unwrap();
+
+                if let Some(static_server) = self.static_servers.read().await.get(route_id) {
+                    // Serve the static file
+                    let req_header = session.req_header();
+                    let path = req_header.uri.path();
+
+                    // Create a minimal request for static server
+                    let static_req = http::Request::builder()
+                        .method(req_header.method.clone())
+                        .uri(req_header.uri.clone())
+                        .body(())
+                        .unwrap();
+
+                    match static_server.serve(&static_req, path).await {
+                        Ok(response) => {
+                            // Convert response to Pingora format
+                            let mut resp_header =
+                                ResponseHeader::build(response.status().as_u16(), None)?;
+
+                            for (key, value) in response.headers() {
+                                resp_header
+                                    .insert_header(key.as_str(), value.to_str().unwrap_or(""))?;
+                            }
+
+                            // Get the body
+                            let body_bytes = response.into_body().into();
+
+                            // Write response to session
+                            session.set_keepalive(None);
+                            session.write_response_header(Box::new(resp_header)).await?;
+                            session.write_response_body(Some(body_bytes)).await?;
+                            session.finish_body().await?;
+
+                            info!(
+                                correlation_id = %ctx.correlation_id,
+                                route_id = route_id,
+                                path = path,
+                                "Served static file"
+                            );
+
+                            return Ok(true); // Skip upstream
+                        }
+                        Err(e) => {
+                            error!(
+                                correlation_id = %ctx.correlation_id,
+                                route_id = route_id,
+                                path = path,
+                                error = %e,
+                                "Failed to serve static file"
+                            );
+
+                            // Return 404 or 500 error using error handler
+                            if let Some(error_handler) =
+                                self.error_handlers.read().await.get(route_id)
+                            {
+                                let status = if e.to_string().contains("404")
+                                    || e.to_string().contains("Not Found")
+                                {
+                                    http::StatusCode::NOT_FOUND
+                                } else {
+                                    http::StatusCode::INTERNAL_SERVER_ERROR
+                                };
+
+                                match error_handler.generate_response(
+                                    status,
+                                    Some(format!("Failed to serve file: {}", path)),
+                                    &ctx.correlation_id,
+                                    None,
+                                ) {
+                                    Ok(error_response) => {
+                                        let mut resp_header = ResponseHeader::build(
+                                            error_response.status().as_u16(),
+                                            None,
+                                        )?;
+                                        for (key, value) in error_response.headers() {
+                                            resp_header.insert_header(
+                                                key.as_str(),
+                                                value.to_str().unwrap_or(""),
+                                            )?;
+                                        }
+                                        let body_bytes = error_response.into_body().into();
+
+                                        session.set_keepalive(None);
+                                        session
+                                            .write_response_header(Box::new(resp_header))
+                                            .await?;
+                                        session.write_response_body(Some(body_bytes)).await?;
+                                        session.finish_body().await?;
+                                    }
+                                    Err(handler_err) => {
+                                        error!(
+                                            "Failed to generate error response: {}",
+                                            handler_err
+                                        );
+                                    }
+                                }
+                            }
+
+                            return Ok(true); // Skip upstream even on error
+                        }
+                    }
+                }
+            }
+        }
+
+        // API validation for API routes
+        if let Some(ref route_id) = ctx.route_id {
+            if let Some(validator) = self.validators.read().await.get(route_id) {
+                // Check if this is a request that needs body validation
+                let req_header = session.req_header();
+                let method = req_header.method.clone();
+
+                // Only validate for methods that typically have bodies
+                if matches!(method.as_str(), "POST" | "PUT" | "PATCH") {
+                    // Read the request body for validation
+                    let body_bytes = session.read_request_body().await.map_err(|e| {
+                        Error::explain(
+                            ErrorType::InternalError,
+                            format!("Failed to read body: {}", e),
+                        )
+                    })?;
+
+                    let path = req_header.uri.path();
+
+                    // Validate the request body
+                    if let Err(validation_error) = validator
+                        .validate_request(
+                            &http::Request::builder()
+                                .method(method)
+                                .uri(req_header.uri.clone())
+                                .body(())
+                                .unwrap(),
+                            &body_bytes,
+                            path,
+                            &ctx.correlation_id,
+                        )
+                        .await
+                    {
+                        warn!(
+                            correlation_id = %ctx.correlation_id,
+                            route_id = route_id,
+                            error = %validation_error,
+                            "Request validation failed"
+                        );
+
+                        // Return validation error response
+                        if let Some(error_handler) = self.error_handlers.read().await.get(route_id)
+                        {
+                            let error_details = serde_json::json!({
+                                "validation_error": validation_error.to_string()
+                            });
+
+                            match error_handler.generate_response(
+                                http::StatusCode::BAD_REQUEST,
+                                Some("Request validation failed".to_string()),
+                                &ctx.correlation_id,
+                                Some(error_details),
+                            ) {
+                                Ok(error_response) => {
+                                    let mut resp_header = ResponseHeader::build(400, None)?;
+                                    for (key, value) in error_response.headers() {
+                                        resp_header.insert_header(
+                                            key.as_str(),
+                                            value.to_str().unwrap_or(""),
+                                        )?;
+                                    }
+                                    let error_body = error_response.into_body().into();
+
+                                    session.set_keepalive(None);
+                                    session.write_response_header(Box::new(resp_header)).await?;
+                                    session.write_response_body(Some(error_body)).await?;
+                                    session.finish_body().await?;
+
+                                    self.metrics.record_blocked_request("validation_failed");
+
+                                    return Ok(true); // Skip upstream on validation failure
+                                }
+                                Err(handler_err) => {
+                                    error!(
+                                        "Failed to generate validation error response: {}",
+                                        handler_err
+                                    );
+                                    return Err(Error::explain(
+                                        ErrorType::InternalError,
+                                        "Validation failed",
+                                    ));
+                                }
+                            }
+                        } else {
+                            // No error handler, return generic error
+                            return Err(Error::explain(
+                                ErrorType::BadRequest,
+                                "Request validation failed",
+                            ));
+                        }
+                    }
+
+                    // Validation passed, restore the body for upstream
+                    session
+                        .write_request_body(Some(body_bytes))
+                        .await
+                        .map_err(|e| {
+                            Error::explain(
+                                ErrorType::InternalError,
+                                format!("Failed to restore body: {}", e),
+                            )
+                        })?;
+
+                    info!(
+                        correlation_id = %ctx.correlation_id,
+                        route_id = route_id,
+                        "Request validation passed"
+                    );
+                }
+            }
+        }
         // Get client address before mutable borrow
         let client_addr = session
             .client_addr()
@@ -545,6 +936,56 @@ impl ProxyHttp for SentinelProxy {
         // Record metrics
         let status = upstream_response.status.as_u16();
         let duration = ctx.start_time.elapsed();
+
+        // Generate custom error pages for error responses
+        if status >= 400 {
+            if let Some(ref route_id) = ctx.route_id {
+                if let Some(error_handler) = self.error_handlers.read().await.get(route_id) {
+                    // Get the status code
+                    let status_code = http::StatusCode::from_u16(status)
+                        .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
+
+                    // Try to generate a custom error page
+                    match error_handler.generate_response(
+                        status_code,
+                        None, // Use default message for status
+                        &ctx.correlation_id,
+                        None,
+                    ) {
+                        Ok(error_response) => {
+                            // Replace the upstream response with our custom error page
+                            upstream_response.set_status(status_code.as_u16())?;
+
+                            // Clear existing headers and add our custom ones
+                            for (key, value) in error_response.headers() {
+                                upstream_response
+                                    .insert_header(key.as_str(), value.to_str().unwrap_or(""))?;
+                            }
+
+                            // The body will be replaced in the body filter
+                            // Store the custom body in context for later use
+                            // Note: This is a simplified approach - in production you'd need
+                            // a proper way to pass the body to the body filter
+
+                            debug!(
+                                correlation_id = %ctx.correlation_id,
+                                route_id = route_id,
+                                status = status,
+                                "Generated custom error page"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                correlation_id = %ctx.correlation_id,
+                                route_id = route_id,
+                                error = %e,
+                                "Failed to generate custom error page"
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         self.metrics.record_request(
             ctx.route_id.as_deref().unwrap_or("unknown"),
