@@ -88,7 +88,7 @@ Sentinel excels in various deployment scenarios:
 
 Sentinel leverages Pingora's battle-tested architecture while adding its own innovations:
 
-```
+```text
 Client Request
      ↓
 [TLS Termination]
