@@ -43,8 +43,10 @@ pub struct RequestContext {
     pub(crate) route_id: Option<String>,
     /// Cached route configuration (avoids duplicate route matching)
     pub(crate) route_config: Option<Arc<RouteConfig>>,
-    /// Selected upstream
+    /// Selected upstream pool ID
     pub(crate) upstream: Option<String>,
+    /// Selected upstream peer address (IP:port) for feedback reporting
+    pub(crate) selected_upstream_address: Option<String>,
     /// Number of upstream attempts
     pub(crate) upstream_attempts: u32,
 
@@ -141,6 +143,12 @@ pub struct RequestContext {
     pub(crate) response_body_inspection_enabled: bool,
     /// Agent IDs for response body inspection
     pub(crate) response_body_inspection_agents: Vec<String>,
+
+    // === OpenTelemetry Tracing ===
+    /// OpenTelemetry request span (if tracing enabled)
+    pub(crate) otel_span: Option<crate::otel::RequestSpan>,
+    /// W3C trace context parsed from incoming request
+    pub(crate) trace_context: Option<crate::otel::TraceContext>,
 }
 
 impl RequestContext {
@@ -153,6 +161,7 @@ impl RequestContext {
             route_id: None,
             route_config: None,
             upstream: None,
+            selected_upstream_address: None,
             upstream_attempts: 0,
             method: String::new(),
             path: String::new(),
@@ -190,6 +199,8 @@ impl RequestContext {
             response_body_bytes_inspected: 0,
             response_body_inspection_enabled: false,
             response_body_inspection_agents: Vec::new(),
+            otel_span: None,
+            trace_context: None,
         }
     }
 
@@ -231,6 +242,12 @@ impl RequestContext {
     #[inline]
     pub fn upstream(&self) -> Option<&str> {
         self.upstream.as_deref()
+    }
+
+    /// Get the selected upstream peer address (IP:port), if set.
+    #[inline]
+    pub fn selected_upstream_address(&self) -> Option<&str> {
+        self.selected_upstream_address.as_deref()
     }
 
     /// Get the cached route configuration, if set.

@@ -96,6 +96,18 @@ impl ProxyHttp for SentinelProxy {
         ctx.route_id = Some(route_match.route_id.to_string());
         ctx.route_config = Some(route_match.config.clone());
 
+        // Parse incoming W3C trace context if present
+        if let Some(traceparent) = req_header.headers.get(crate::otel::TRACEPARENT_HEADER) {
+            if let Ok(s) = traceparent.to_str() {
+                ctx.trace_context = crate::otel::TraceContext::parse_traceparent(s);
+            }
+        }
+
+        // Start OpenTelemetry request span if tracing is enabled
+        if let Some(tracer) = crate::otel::get_tracer() {
+            ctx.otel_span = Some(tracer.start_span(method, path, ctx.trace_context.as_ref()));
+        }
+
         // Check if this is a builtin handler route
         if route_match.config.service_type == sentinel_config::ServiceType::Builtin {
             trace!(
@@ -227,6 +239,28 @@ impl ProxyHttp for SentinelProxy {
 
             ctx.route_id = Some(match_result.route_id.to_string());
             ctx.route_config = Some(match_result.config.clone());
+
+            // Set trace_id if not already set by early_request_filter
+            if ctx.trace_id.is_empty() {
+                ctx.trace_id = self.get_trace_id(session);
+
+                // Parse incoming W3C trace context if present
+                if let Some(traceparent) = req_header.headers.get(crate::otel::TRACEPARENT_HEADER)
+                {
+                    if let Ok(s) = traceparent.to_str() {
+                        ctx.trace_context = crate::otel::TraceContext::parse_traceparent(s);
+                    }
+                }
+
+                // Start OpenTelemetry request span if tracing is enabled
+                if let Some(tracer) = crate::otel::get_tracer() {
+                    ctx.otel_span = Some(tracer.start_span(
+                        &ctx.method,
+                        &ctx.path,
+                        ctx.trace_context.as_ref(),
+                    ));
+                }
+            }
 
             trace!(
                 correlation_id = %ctx.trace_id,
@@ -1155,6 +1189,17 @@ impl ProxyHttp for SentinelProxy {
             duration,
         );
 
+        // Record OpenTelemetry span status
+        if let Some(ref mut span) = ctx.otel_span {
+            span.set_status(status);
+            if let Some(ref upstream) = ctx.upstream {
+                span.set_upstream(upstream, "");
+            }
+            if status >= 500 {
+                span.record_error(&format!("HTTP {}", status));
+            }
+        }
+
         // Record passive health check
         if let Some(ref upstream) = ctx.upstream {
             let success = status < 500;
@@ -1253,6 +1298,16 @@ impl ProxyHttp for SentinelProxy {
         upstream_request
             .insert_header("X-Trace-Id", &ctx.trace_id)
             .ok();
+
+        // Add W3C traceparent header for distributed tracing
+        if let Some(ref span) = ctx.otel_span {
+            let sampled = ctx.trace_context.as_ref().map(|c| c.sampled).unwrap_or(true);
+            let traceparent =
+                crate::otel::create_traceparent(&span.trace_id, &span.span_id, sampled);
+            upstream_request
+                .insert_header(crate::otel::TRACEPARENT_HEADER, &traceparent)
+                .ok();
+        }
 
         // Add request metadata headers
         upstream_request
@@ -2146,6 +2201,11 @@ impl ProxyHttp for SentinelProxy {
                 client_ip = %ctx.client_ip,
                 "WebSocket connection established"
             );
+        }
+
+        // End OpenTelemetry span
+        if let Some(span) = ctx.otel_span.take() {
+            span.end();
         }
     }
 }

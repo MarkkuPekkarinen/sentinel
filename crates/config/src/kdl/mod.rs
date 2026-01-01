@@ -19,7 +19,8 @@ use tracing::{debug, trace};
 
 // Re-export commonly used items
 pub use helpers::{
-    get_bool_entry, get_first_arg_string, get_int_entry, get_string_entry, offset_to_line_col,
+    get_bool_entry, get_first_arg_string, get_float_entry, get_int_entry, get_string_entry,
+    offset_to_line_col,
 };
 
 pub use filters::parse_filter_definitions;
@@ -840,6 +841,9 @@ pub fn parse_observability_config(node: &kdl::KdlNode) -> Result<ObservabilityCo
                 "metrics" => {
                     config.metrics = parse_metrics_config(child)?;
                 }
+                "tracing" => {
+                    config.tracing = Some(parse_tracing_config(child)?);
+                }
                 _ => {
                     trace!(name = %name, "Unknown observability config block, ignoring");
                 }
@@ -985,6 +989,72 @@ fn parse_metrics_config(node: &kdl::KdlNode) -> Result<crate::observability::Met
     Ok(config)
 }
 
+/// Parse tracing configuration block
+///
+/// KDL format:
+/// ```kdl
+/// tracing {
+///     backend "otlp" {
+///         endpoint "http://localhost:4317"
+///     }
+///     sampling-rate 0.1
+///     service-name "sentinel"
+/// }
+/// ```
+fn parse_tracing_config(node: &kdl::KdlNode) -> Result<crate::observability::TracingConfig> {
+    use crate::observability::TracingConfig;
+    use helpers::get_float_entry;
+
+    let backend = parse_tracing_backend(node)?;
+
+    let sampling_rate = get_float_entry(node, "sampling-rate").unwrap_or(0.01);
+    let service_name =
+        get_string_entry(node, "service-name").unwrap_or_else(|| "sentinel".to_string());
+
+    Ok(TracingConfig {
+        backend,
+        sampling_rate,
+        service_name,
+    })
+}
+
+/// Parse tracing backend configuration
+///
+/// Supports:
+/// - `backend "otlp" { endpoint "..." }`
+/// - `backend "jaeger" { endpoint "..." }`
+/// - `backend "zipkin" { endpoint "..." }`
+fn parse_tracing_backend(node: &kdl::KdlNode) -> Result<crate::observability::TracingBackend> {
+    use crate::observability::TracingBackend;
+
+    // Look for a "backend" child node
+    let backend_node = node
+        .children()
+        .and_then(|children| children.get("backend"))
+        .ok_or_else(|| anyhow::anyhow!("tracing config requires 'backend' block"))?;
+
+    // Get the backend type from the first argument
+    let backend_type = backend_node
+        .entries()
+        .first()
+        .and_then(|e| e.value().as_string())
+        .ok_or_else(|| anyhow::anyhow!("backend requires a type (otlp, jaeger, or zipkin)"))?;
+
+    // Get the endpoint from the backend block's children
+    let endpoint = get_string_entry(backend_node, "endpoint")
+        .ok_or_else(|| anyhow::anyhow!("backend requires 'endpoint' configuration"))?;
+
+    match backend_type.to_lowercase().as_str() {
+        "otlp" => Ok(TracingBackend::Otlp { endpoint }),
+        "jaeger" => Ok(TracingBackend::Jaeger { endpoint }),
+        "zipkin" => Ok(TracingBackend::Zipkin { endpoint }),
+        other => Err(anyhow::anyhow!(
+            "Unknown tracing backend '{}'. Supported: otlp, jaeger, zipkin",
+            other
+        )),
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -993,6 +1063,48 @@ fn parse_metrics_config(node: &kdl::KdlNode) -> Result<crate::observability::Met
 mod tests {
     use super::*;
     use crate::filters::RateLimitKey;
+
+    #[test]
+    fn test_parse_tracing_config() {
+        let kdl = r#"
+            tracing {
+                backend "otlp" {
+                    endpoint "http://localhost:4317"
+                }
+                sampling-rate 0.5
+                service-name "my-service"
+            }
+        "#;
+        let doc: kdl::KdlDocument = kdl.parse().unwrap();
+        let node = doc.nodes().first().unwrap();
+
+        let config = parse_tracing_config(node).unwrap();
+        assert_eq!(config.sampling_rate, 0.5);
+        assert_eq!(config.service_name, "my-service");
+        match config.backend {
+            crate::observability::TracingBackend::Otlp { endpoint } => {
+                assert_eq!(endpoint, "http://localhost:4317");
+            }
+            _ => panic!("Expected OTLP backend"),
+        }
+    }
+
+    #[test]
+    fn test_parse_tracing_config_defaults() {
+        let kdl = r#"
+            tracing {
+                backend "jaeger" {
+                    endpoint "http://jaeger:14268/api/traces"
+                }
+            }
+        "#;
+        let doc: kdl::KdlDocument = kdl.parse().unwrap();
+        let node = doc.nodes().first().unwrap();
+
+        let config = parse_tracing_config(node).unwrap();
+        assert_eq!(config.sampling_rate, 0.01); // default
+        assert_eq!(config.service_name, "sentinel"); // default
+    }
 
     #[test]
     fn test_parse_rate_limits_config_empty() {

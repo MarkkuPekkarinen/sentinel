@@ -224,6 +224,24 @@ fn run_server(
     // Get initial config for server setup
     let config = proxy.config_manager.current();
 
+    // Initialize OpenTelemetry tracer if configured
+    if let Some(ref tracing_config) = config.observability.tracing {
+        match sentinel_proxy::otel::init_tracer(tracing_config) {
+            Ok(()) => {
+                info!(
+                    backend = ?tracing_config.backend,
+                    sampling_rate = tracing_config.sampling_rate,
+                    service_name = %tracing_config.service_name,
+                    "OpenTelemetry tracing enabled"
+                );
+            }
+            Err(e) => {
+                warn!("Failed to initialize OpenTelemetry tracer: {}", e);
+                warn!("Distributed tracing will be disabled");
+            }
+        }
+    }
+
     // Configure Pingora ServerConf with our settings
     let worker_threads = if config.server.worker_threads > 0 {
         config.server.worker_threads
@@ -450,6 +468,8 @@ async fn run_signal_handler(
             }
             Ok(Some(SignalType::Shutdown)) => {
                 info!("Processing graceful shutdown request");
+                // Shutdown OpenTelemetry tracer to flush pending spans
+                sentinel_proxy::otel::shutdown_tracer();
                 // Note: Connection draining is handled by Pingora's internal mechanisms
                 // We give it a moment to start draining, then the signal thread will force exit
                 info!("Shutdown initiated, draining connections...");

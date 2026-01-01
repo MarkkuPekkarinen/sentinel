@@ -45,6 +45,19 @@ pub fn get_bool_entry(node: &kdl::KdlNode, name: &str) -> Option<bool> {
         .and_then(|e| e.value().as_bool())
 }
 
+/// Helper to get a float entry from a KDL node
+pub fn get_float_entry(node: &kdl::KdlNode, name: &str) -> Option<f64> {
+    node.children()
+        .and_then(|children| children.get(name))
+        .and_then(|n| n.entries().first())
+        .and_then(|e| {
+            // Try as float first, then as integer converted to float
+            e.value()
+                .as_float()
+                .or_else(|| e.value().as_integer().map(|i| i as f64))
+        })
+}
+
 /// Helper to get the first argument of a node as a string
 pub fn get_first_arg_string(node: &kdl::KdlNode) -> Option<String> {
     node.entries()

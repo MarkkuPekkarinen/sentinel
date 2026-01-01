@@ -131,7 +131,7 @@ mod otel_impl {
     use opentelemetry_sdk::trace::Sampler;
     use opentelemetry_sdk::Resource;
     use std::sync::Arc;
-    use tracing::error;
+    use tracing::{error, info};
 
     /// OpenTelemetry tracer wrapper
     pub struct OtelTracer {
