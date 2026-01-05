@@ -29,4 +29,7 @@ pub enum AgentProtocolError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Wrong connection type: {0}")]
+    WrongConnectionType(String),
 }

@@ -218,7 +218,9 @@ impl AgentClient {
         let grpc_request = Self::build_grpc_request(event_type, payload)?;
 
         let AgentConnection::Grpc(client) = &mut self.connection else {
-            unreachable!()
+            return Err(AgentProtocolError::WrongConnectionType(
+                "Expected gRPC connection but found Unix socket".to_string()
+            ));
         };
 
         // Send with timeout
@@ -256,7 +258,11 @@ impl AgentClient {
         };
 
         let event = match event_type {
-            EventType::Configure => unreachable!("Configure handled above"),
+            EventType::Configure => {
+                return Err(AgentProtocolError::InvalidMessage(
+                    "Configure event should be handled separately".to_string()
+                ));
+            },
             EventType::RequestHeaders => {
                 let event: RequestHeadersEvent = serde_json::from_value(payload_json)
                     .map_err(|e| AgentProtocolError::Serialization(e.to_string()))?;
@@ -474,7 +480,9 @@ impl AgentClient {
     /// Send raw bytes to agent (Unix socket only)
     async fn send_raw_unix(&mut self, data: &[u8]) -> Result<(), AgentProtocolError> {
         let AgentConnection::UnixSocket(stream) = &mut self.connection else {
-            unreachable!()
+            return Err(AgentProtocolError::WrongConnectionType(
+                "Expected Unix socket connection but found gRPC".to_string()
+            ));
         };
         // Write message length (4 bytes, big-endian)
         let len_bytes = (data.len() as u32).to_be_bytes();
@@ -488,7 +496,9 @@ impl AgentClient {
     /// Receive raw bytes from agent (Unix socket only)
     async fn receive_raw_unix(&mut self) -> Result<Vec<u8>, AgentProtocolError> {
         let AgentConnection::UnixSocket(stream) = &mut self.connection else {
-            unreachable!()
+            return Err(AgentProtocolError::WrongConnectionType(
+                "Expected Unix socket connection but found gRPC".to_string()
+            ));
         };
         // Read message length (4 bytes, big-endian)
         let mut len_bytes = [0u8; 4];
